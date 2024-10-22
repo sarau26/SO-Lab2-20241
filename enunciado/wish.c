@@ -3,12 +3,18 @@
 #include <string.h>
 #include <unistd.h>
 
+// Función para mostrar un error genérico
+void showError() {
+    const char *error_message = "An error has occurred\n";
+    write(STDERR_FILENO, error_message, strlen(error_message));
+}
+
 int main(int argc, char *argv[]) {
     FILE *input = stdin;  // Por defecto, la entrada es stdin (modo interactivo)
     
     // Si hay más de un argumento, es un error
     if (argc > 2) {
-        fprintf(stderr, "wish: too many arguments\n");
+        showError();
         exit(1);
     }
     
@@ -16,7 +22,7 @@ int main(int argc, char *argv[]) {
     if (argc == 2) {
         input = fopen(argv[1], "r");
         if (input == NULL) {
-            fprintf(stderr, "wish: cannot open file\n");
+            showError();
             exit(1);
         }
     }
@@ -40,13 +46,30 @@ int main(int argc, char *argv[]) {
         // Quitar el salto de línea
         line[strcspn(line, "\n")] = '\0';
 
+        // Parsear la línea en tokens
+        char *token = strtok(line, " ");
+        
         // Manejar el comando 'exit'
-        if (strcmp(line, "exit") == 0) {
-            free(line);
-            exit(0);
+        if (token != NULL && strcmp(token, "exit") == 0) {
+            if (strtok(NULL, " ") != NULL) {  // 'exit' no debe tener argumentos
+                showError();
+            } else {
+                free(line);
+                exit(0);  // Salir si 'exit' se usa sin argumentos
+            }
         }
 
-        // Aquí procesarías los otros comandos y ejecutables externos
+        // Manejar el comando 'cd'
+        else if (token != NULL && strcmp(token, "cd") == 0) {
+            char *dir = strtok(NULL, " ");
+            if (dir == NULL || strtok(NULL, " ") != NULL) {  // 'cd' requiere exactamente un argumento
+                showError();
+            } else if (chdir(dir) != 0) {  // Intentar cambiar de directorio
+                showError();
+            }
+        }
+
+        // Si es otro comando, aquí iría la lógica de ejecutables externos
         
         free(line);  // Liberar la memoria después de cada línea
     }
