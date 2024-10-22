@@ -2,10 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
-// Función para mostrar un error genérico
+#define MAX_ARGS 10
+
 void showError() {
-    const char *error_message = "An error has occurred\n";
+    char error_message[30] = "An error has occurred\n";
     write(STDERR_FILENO, error_message, strlen(error_message));
 }
 
@@ -46,31 +48,53 @@ int main(int argc, char *argv[]) {
         // Quitar el salto de línea
         line[strcspn(line, "\n")] = '\0';
 
-        // Parsear la línea en tokens
-        char *token = strtok(line, " ");
-        
         // Manejar el comando 'exit'
-        if (token != NULL && strcmp(token, "exit") == 0) {
-            if (strtok(NULL, " ") != NULL) {  // 'exit' no debe tener argumentos
+        if (strcmp(line, "exit") == 0) {
+            free(line);
+            exit(0);
+        }
+
+        // Parsear la línea en tokens (argumentos)
+        char *args[MAX_ARGS];
+        int arg_count = 0;
+        char *token = strtok(line, " ");
+        while (token != NULL && arg_count < MAX_ARGS - 1) {
+            args[arg_count++] = token;
+            token = strtok(NULL, " ");
+        }
+        args[arg_count] = NULL;
+
+        // Si el comando es 'cd', manejamos el cambio de directorio
+        if (strcmp(args[0], "cd") == 0) {
+            if (arg_count != 2) {
                 showError();
+            } else if (chdir(args[1]) != 0) {
+                showError();
+            }
+        }
+        // Si el comando no es 'cd', lo ejecutamos como un programa externo
+        else {
+            pid_t pid = fork();
+            if (pid == 0) {  // Proceso hijo
+                // Intentar ejecutar el comando
+                if (execv(args[0], args) == -1) {
+                    // Intentar ejecutar con ruta completa (/bin/ls, por ejemplo)
+                    char path[100];
+                    snprintf(path, sizeof(path), "/bin/%s", args[0]);
+                    execv(path, args);
+                    // Si falla, mostrar el mensaje de error y salir
+                    perror(args[0]);
+                    exit(1);
+                }
+            } else if (pid > 0) {  // Proceso padre
+                // Esperar a que el hijo termine
+                wait(NULL);
             } else {
-                free(line);
-                exit(0);  // Salir si 'exit' se usa sin argumentos
-            }
-        }
-
-        // Manejar el comando 'cd'
-        else if (token != NULL && strcmp(token, "cd") == 0) {
-            char *dir = strtok(NULL, " ");
-            if (dir == NULL || strtok(NULL, " ") != NULL) {  // 'cd' requiere exactamente un argumento
-                showError();
-            } else if (chdir(dir) != 0) {  // Intentar cambiar de directorio
+                // Error al hacer fork
                 showError();
             }
         }
 
-        // Si es otro comando, aquí iría la lógica de ejecutables externos
-        
         free(line);  // Liberar la memoria después de cada línea
     }
 
