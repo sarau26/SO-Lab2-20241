@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #define MAX_ARGS 10
 
@@ -13,13 +14,13 @@ void showError() {
 
 int main(int argc, char *argv[]) {
     FILE *input = stdin;  // Por defecto, la entrada es stdin (modo interactivo)
-    
+
     // Si hay más de un argumento, es un error
     if (argc > 2) {
         showError();
         exit(1);
     }
-    
+
     // Si hay un argumento, es el nombre de un archivo (modo batch)
     if (argc == 2) {
         input = fopen(argv[1], "r");
@@ -48,34 +49,102 @@ int main(int argc, char *argv[]) {
         // Quitar el salto de línea
         line[strcspn(line, "\n")] = '\0';
 
-        // Manejar el comando 'exit'
-        if (strcmp(line, "exit") == 0) {
+        // Ignorar líneas vacías
+        if (strlen(line) == 0) {
             free(line);
-            exit(0);
+            continue;  // Salir del bucle actual y seguir con la siguiente línea
         }
 
         // Parsear la línea en tokens (argumentos)
         char *args[MAX_ARGS];
         int arg_count = 0;
         char *token = strtok(line, " ");
+        char *output_file = NULL;
+        int redirection_count = 0;  // Contador de redirecciones
+        int redirection_flag = 0;   // Bandera para detectar errores de redirección
+        
+        // Verificar si hay un comando antes de la redirección
+        int has_command = 0;
+
         while (token != NULL && arg_count < MAX_ARGS - 1) {
-            args[arg_count++] = token;
+            if (strcmp(token, ">") == 0) {
+                // Contar el número de redirecciones
+                redirection_count++;
+                if (redirection_count > 1) {
+                    // Si hay más de un '>', mostrar error y salir del bucle
+                    showError();
+                    redirection_flag = 1;
+                    break;
+                }
+                // Redirección de salida
+                token = strtok(NULL, " ");
+                if (token == NULL) {
+                    // Si no hay archivo especificado después de '>', mostrar error
+                    showError();
+                    redirection_flag = 1;
+                    break;
+                }
+                output_file = token;
+                // Comprobar si hay múltiples archivos después de la redirección
+                token = strtok(NULL, " ");
+                if (token != NULL) {
+                    // Si hay más de un archivo especificado, mostrar error
+                    showError();
+                    redirection_flag = 1;
+                    break;
+                }
+            } else if (strcmp(token, "&") == 0) {
+                // Ignorar el símbolo de ampersand solo, ya que no hay comando
+                // Sin embargo, esto se debe manejar más adelante
+                token = strtok(NULL, " ");
+                continue;  // Continuar al siguiente token
+            } else {
+                args[arg_count++] = token;
+                has_command = 1; // Hay un comando antes de la redirección
+            }
             token = strtok(NULL, " ");
         }
         args[arg_count] = NULL;
 
+        if (redirection_flag || (!has_command && output_file != NULL)) {
+            free(line);
+            continue;  // Salir del bucle actual y seguir con la siguiente línea
+        }
+
+        // Manejar el comando 'exit'
+        if (args[0] != NULL && strcmp(args[0], "exit") == 0) {
+            if (arg_count != 1) {  // Si 'exit' tiene más de un argumento, mostrar error
+                showError();
+            } else {
+                free(line);
+                exit(0);
+            }
+        }
+
         // Si el comando es 'cd', manejamos el cambio de directorio
-        if (strcmp(args[0], "cd") == 0) {
+        else if (args[0] != NULL && strcmp(args[0], "cd") == 0) {
             if (arg_count != 2) {
                 showError();
             } else if (chdir(args[1]) != 0) {
                 showError();
             }
         }
-        // Si el comando no es 'cd', lo ejecutamos como un programa externo
-        else {
+        // Si el comando no es 'cd' y hay un comando, lo ejecutamos como un programa externo
+        else if (args[0] != NULL) {
             pid_t pid = fork();
             if (pid == 0) {  // Proceso hijo
+                // Si hay redirección de salida, cambiar el descriptor de archivo
+                if (output_file != NULL) {
+                    int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (fd == -1) {
+                        showError();
+                        exit(1);
+                    }
+                    dup2(fd, STDOUT_FILENO);
+                    dup2(fd, STDERR_FILENO);  // Redirigir también la salida de error
+                    close(fd);
+                }
+
                 // Intentar ejecutar el comando
                 if (execv(args[0], args) == -1) {
                     // Intentar ejecutar con ruta completa (/bin/ls, por ejemplo)
@@ -83,7 +152,7 @@ int main(int argc, char *argv[]) {
                     snprintf(path, sizeof(path), "/bin/%s", args[0]);
                     execv(path, args);
                     // Si falla, mostrar el mensaje de error y salir
-                    perror(args[0]);
+                    showError();
                     exit(1);
                 }
             } else if (pid > 0) {  // Proceso padre
