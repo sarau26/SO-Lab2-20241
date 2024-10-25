@@ -49,8 +49,8 @@ int main(int argc, char *argv[]) {
         // Quitar el salto de línea
         line[strcspn(line, "\n")] = '\0';
 
-        // Ignorar líneas vacías
-        if (strlen(line) == 0) {
+        // Ignorar líneas vacías o que contienen solo espacios
+        if (strlen(line) == 0 || strspn(line, " \t") == strlen(line)) {
             free(line);
             continue;  // Salir del bucle actual y seguir con la siguiente línea
         }
