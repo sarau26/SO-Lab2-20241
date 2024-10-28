@@ -128,12 +128,9 @@ int main(int argc, char *argv[]) {
                     break;
                 }
                 output_file = token;
-            } else if (strcmp(token, "&") == 0) {
-                token = strtok(NULL, " ");
-                continue;  // Ignorar el símbolo de ampersand
             } else {
-                args[arg_count++] = token;
-                has_command = 1; // Hay un comando antes de la redirección
+                args[arg_count++] = token; // Agregar argumento
+                has_command = 1; // Hay un comando
             }
             token = strtok(NULL, " ");
         }
@@ -177,7 +174,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // Ejecutar un comando externo
+        // Manejar comandos en paralelo
         else if (args[0] != NULL) {
             // Comprobar si se intentó sobrescribir la ruta
             if (path_overwrite_attempted && strcmp(args[0], "ls") == 0) {
@@ -186,78 +183,92 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            pid_t pid = fork();
-            if (pid == 0) {  // Proceso hijo
-                // Redirigir salida solo si se especifica un archivo
-                if (output_file != NULL) {
-                    int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd < 0) {
-                        showError(); // Error al abrir el archivo
-                        exit(1);
-                    }
-                    dup2(fd, STDOUT_FILENO); // Redirigir stdout al archivo
-                    close(fd);
+            // Variables para la ejecución de procesos
+            pid_t pids[MAX_ARGS]; // Array para almacenar los PIDs de los procesos
+            int pid_count = 0; // Contador de PIDs
+
+            // Ejecutar comandos en paralelo
+            int start_idx = 0;
+            while (start_idx < arg_count) {
+                // Encontrar el final del comando
+                int end_idx = start_idx;
+                while (end_idx < arg_count && strcmp(args[end_idx], "&") != 0) {
+                    end_idx++;
                 }
 
-                char *command_path = findCommand(args[0]);
-                if (command_path != NULL) {
-                    execv(command_path, args); // Ejecutar el comando externo
-                    showError(); // Si execv falla
+                // Crear un nuevo proceso
+                pid_t pid = fork();
+                if (pid == 0) {  // Proceso hijo
+                    // Redirigir salida solo si se especifica un archivo
+                    if (output_file != NULL) {
+                        int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                        if (fd < 0) {
+                            showError(); // Error al abrir el archivo
+                            exit(1);
+                        }
+                        dup2(fd, STDOUT_FILENO); // Redirigir stdout al archivo
+                        close(fd);
+                    }
+
+                    // Ejecutar el comando correspondiente
+                    char *command_path = findCommand(args[start_idx]);
+                    if (command_path != NULL) {
+                        execv(command_path, &args[start_idx]); // Ejecutar el comando externo
+                        showError(); // Si execv falla
+                    } else {
+                        showError(); // Comando no encontrado
+                    }
+                    exit(1);
+                } else if (pid < 0) {
+                    showError(); // Error al hacer fork
                 } else {
-                    showError(); // Comando no encontrado
+                    // Guardar el PID del proceso hijo
+                    pids[pid_count++] = pid;
                 }
-                exit(1);
-            } else if (pid > 0) {  // Proceso padre
-                int status;
-                wait(&status);
-                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                    last_command_success = 1; // Comando ejecutado exitosamente
-                } else {
-                    last_command_success = 0; // Comando fallido
-                }
-            } else {
-                showError(); // Error al hacer fork
+
+                // Mover al siguiente comando
+                start_idx = end_idx + 1;
+            }
+
+            // Esperar a que todos los procesos hijos terminen
+            for (int i = 0; i < pid_count; i++) {
+                waitpid(pids[i], NULL, 0);
             }
         }
 
         // Manejar el comando 'ls'
         else if (args[0] != NULL && strcmp(args[0], "ls") == 0) {
             if (last_command_success) { // Verifica si el último comando fue exitoso
+                // Crear un nuevo proceso
                 pid_t pid = fork();
                 if (pid == 0) {  // Proceso hijo
-                    // Redirigir la salida a /dev/null
-                    int fd = open("/dev/null", O_WRONLY);
-                    dup2(fd, STDOUT_FILENO);
-                    close(fd);
+                    // Redirigir salida solo si se especifica un archivo
+                    if (output_file != NULL) {
+                        int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                        if (fd < 0) {
+                            showError(); // Error al abrir el archivo
+                            exit(1);
+                        }
+                        dup2(fd, STDOUT_FILENO); // Redirigir stdout al archivo
+                        close(fd);
+                    }
 
-                    // Ejecutar el comando ls
-                    char *command_path = findCommand("ls");
-                    if (command_path != NULL) {
-                        execl(command_path, "ls", NULL);
-                        showError(); // Si execl falla
-                    } else {
-                        showError(); // Comando 'ls' no encontrado
-                    }
+                    execlp("ls", "ls", NULL); // Ejecutar ls
+                    showError(); // Si execlp falla
                     exit(1);
-                } else if (pid > 0) {  // Proceso padre
-                    int status;
-                    wait(&status);
-                    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                        last_command_success = 1; // Comando ejecutado exitosamente
-                    } else {
-                        last_command_success = 0; // Comando fallido
-                    }
-                } else {
+                } else if (pid < 0) {
                     showError(); // Error al hacer fork
                 }
-            } else {
-                showError(); // El último comando falló, 'ls' no ejecutado
+
+                wait(NULL); // Esperar a que el proceso hijo termine
             }
         }
 
-        free(line); // Liberar la memoria de la línea de entrada
+        free(line); // Liberar la memoria de la línea
     }
 
+    // Liberar memoria antes de salir
+    //free(line);
     free(current_path); // Liberar la memoria del path actual
     return 0;
 }
