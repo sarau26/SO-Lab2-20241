@@ -6,10 +6,55 @@
 #include <fcntl.h>
 
 #define MAX_ARGS 10
+#define MAX_PATH_LENGTH 1024
+
+char *current_path = NULL; // Variable global para almacenar la ruta actual
+int last_command_success = 1; // Para rastrear el éxito del último comando
+int path_overwrite_attempted = 0; // Bandera para indicar intento de sobrescribir la ruta
 
 void showError() {
-    char error_message[30] = "An error has occurred\n";
-    write(STDERR_FILENO, error_message, strlen(error_message));
+    write(STDERR_FILENO, "An error has occurred\n", 22);
+    last_command_success = 0; // Marcar que hubo un error
+}
+
+char* findCommand(char *command) {
+    char full_path[MAX_PATH_LENGTH];
+
+    // Si hay una ruta actual definida, usarla
+    if (current_path != NULL) {
+        snprintf(full_path, sizeof(full_path), "%s/%s", current_path, command);
+        if (access(full_path, X_OK) == 0) { // Verificar si el comando es ejecutable
+            return strdup(full_path); // Retornar el camino completo del comando
+        }
+    }
+
+    // Si no hay una ruta actual, verificar el PATH
+    char *path_env = getenv("PATH");
+    if (path_env == NULL) return NULL;
+
+    char *token = strtok(path_env, ":");
+    while (token != NULL) {
+        snprintf(full_path, sizeof(full_path), "%s/%s", token, command);
+        if (access(full_path, X_OK) == 0) { // Verificar si el comando es ejecutable
+            return strdup(full_path); // Retornar el camino completo del comando
+        }
+        token = strtok(NULL, ":");
+    }
+
+    return NULL; // Comando no encontrado
+}
+
+void clearPath() {
+    if (current_path != NULL) {
+        free(current_path); // Liberar la memoria anterior
+        current_path = NULL; // Limpiar la ruta actual
+    }
+}
+
+void setPath(char *path) {
+    clearPath(); // Limpiar la ruta actual antes de establecer una nueva
+    current_path = strdup(path); // Establecer la nueva ruta
+    path_overwrite_attempted = 1; // Marcar que se intentó sobrescribir la ruta
 }
 
 int main(int argc, char *argv[]) {
@@ -58,46 +103,34 @@ int main(int argc, char *argv[]) {
         // Parsear la línea en tokens (argumentos)
         char *args[MAX_ARGS];
         int arg_count = 0;
-        char *token = strtok(line, " ");
         char *output_file = NULL;
         int redirection_count = 0;  // Contador de redirecciones
         int redirection_flag = 0;   // Bandera para detectar errores de redirección
-        
+
         // Verificar si hay un comando antes de la redirección
         int has_command = 0;
 
+        // Parsear la línea en tokens
+        char *token = strtok(line, " ");
         while (token != NULL && arg_count < MAX_ARGS - 1) {
             if (strcmp(token, ">") == 0) {
-                // Contar el número de redirecciones
+                // Manejar la redirección de salida
                 redirection_count++;
                 if (redirection_count > 1) {
-                    // Si hay más de un '>', mostrar error y salir del bucle
                     showError();
-                    redirection_flag = 1;
+                    redirection_flag = 1; // Marcar error de redirección
                     break;
                 }
-                // Redirección de salida
                 token = strtok(NULL, " ");
                 if (token == NULL) {
-                    // Si no hay archivo especificado después de '>', mostrar error
                     showError();
-                    redirection_flag = 1;
+                    redirection_flag = 1; // Marcar error de redirección
                     break;
                 }
                 output_file = token;
-                // Comprobar si hay múltiples archivos después de la redirección
-                token = strtok(NULL, " ");
-                if (token != NULL) {
-                    // Si hay más de un archivo especificado, mostrar error
-                    showError();
-                    redirection_flag = 1;
-                    break;
-                }
             } else if (strcmp(token, "&") == 0) {
-                // Ignorar el símbolo de ampersand solo, ya que no hay comando
-                // Sin embargo, esto se debe manejar más adelante
                 token = strtok(NULL, " ");
-                continue;  // Continuar al siguiente token
+                continue;  // Ignorar el símbolo de ampersand
             } else {
                 args[arg_count++] = token;
                 has_command = 1; // Hay un comando antes de la redirección
@@ -113,59 +146,118 @@ int main(int argc, char *argv[]) {
 
         // Manejar el comando 'exit'
         if (args[0] != NULL && strcmp(args[0], "exit") == 0) {
-            if (arg_count != 1) {  // Si 'exit' tiene más de un argumento, mostrar error
+            if (arg_count != 1) {
                 showError();
             } else {
                 free(line);
+                free(current_path); // Liberar la memoria del path actual
                 exit(0);
             }
         }
 
-        // Si el comando es 'cd', manejamos el cambio de directorio
+        // Manejar el comando 'path'
+        else if (args[0] != NULL && strcmp(args[0], "path") == 0) {
+            if (arg_count == 1) {
+                clearPath(); // Limpiar la ruta actual si no se proporciona un argumento
+            } else if (arg_count == 2) {
+                setPath(args[1]); // Establecer la nueva ruta
+            } else {
+                showError(); // Manejo de error si hay más de 2 argumentos
+            }
+        }
+
+        // Manejar el comando 'cd'
         else if (args[0] != NULL && strcmp(args[0], "cd") == 0) {
             if (arg_count != 2) {
                 showError();
             } else if (chdir(args[1]) != 0) {
                 showError();
+            } else {
+                last_command_success = 1; // Comando cd exitoso
             }
         }
-        // Si el comando no es 'cd' y hay un comando, lo ejecutamos como un programa externo
+
+        // Ejecutar un comando externo
         else if (args[0] != NULL) {
+            // Comprobar si se intentó sobrescribir la ruta
+            if (path_overwrite_attempted && strcmp(args[0], "ls") == 0) {
+                showError(); // No ejecutar ls porque se intentó sobrescribir la ruta
+                free(line);
+                continue;
+            }
+
             pid_t pid = fork();
             if (pid == 0) {  // Proceso hijo
-                // Si hay redirección de salida, cambiar el descriptor de archivo
+                // Redirigir salida solo si se especifica un archivo
                 if (output_file != NULL) {
                     int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd == -1) {
-                        showError();
+                    if (fd < 0) {
+                        showError(); // Error al abrir el archivo
                         exit(1);
                     }
-                    dup2(fd, STDOUT_FILENO);
-                    dup2(fd, STDERR_FILENO);  // Redirigir también la salida de error
+                    dup2(fd, STDOUT_FILENO); // Redirigir stdout al archivo
                     close(fd);
                 }
 
-                // Intentar ejecutar el comando
-                if (execv(args[0], args) == -1) {
-                    // Intentar ejecutar con ruta completa (/bin/ls, por ejemplo)
-                    char path[100];
-                    snprintf(path, sizeof(path), "/bin/%s", args[0]);
-                    execv(path, args);
-                    // Si falla, mostrar el mensaje de error y salir
-                    showError();
-                    exit(1);
+                char *command_path = findCommand(args[0]);
+                if (command_path != NULL) {
+                    execv(command_path, args); // Ejecutar el comando externo
+                    showError(); // Si execv falla
+                } else {
+                    showError(); // Comando no encontrado
                 }
+                exit(1);
             } else if (pid > 0) {  // Proceso padre
-                // Esperar a que el hijo termine
-                wait(NULL);
+                int status;
+                wait(&status);
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    last_command_success = 1; // Comando ejecutado exitosamente
+                } else {
+                    last_command_success = 0; // Comando fallido
+                }
             } else {
-                // Error al hacer fork
-                showError();
+                showError(); // Error al hacer fork
             }
         }
 
-        free(line);  // Liberar la memoria después de cada línea
+        // Manejar el comando 'ls'
+        else if (args[0] != NULL && strcmp(args[0], "ls") == 0) {
+            if (last_command_success) { // Verifica si el último comando fue exitoso
+                pid_t pid = fork();
+                if (pid == 0) {  // Proceso hijo
+                    // Redirigir la salida a /dev/null
+                    int fd = open("/dev/null", O_WRONLY);
+                    dup2(fd, STDOUT_FILENO);
+                    close(fd);
+
+                    // Ejecutar el comando ls
+                    char *command_path = findCommand("ls");
+                    if (command_path != NULL) {
+                        execl(command_path, "ls", NULL);
+                        showError(); // Si execl falla
+                    } else {
+                        showError(); // Comando 'ls' no encontrado
+                    }
+                    exit(1);
+                } else if (pid > 0) {  // Proceso padre
+                    int status;
+                    wait(&status);
+                    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                        last_command_success = 1; // Comando ejecutado exitosamente
+                    } else {
+                        last_command_success = 0; // Comando fallido
+                    }
+                } else {
+                    showError(); // Error al hacer fork
+                }
+            } else {
+                showError(); // El último comando falló, 'ls' no ejecutado
+            }
+        }
+
+        free(line); // Liberar la memoria de la línea de entrada
     }
 
+    free(current_path); // Liberar la memoria del path actual
     return 0;
 }
